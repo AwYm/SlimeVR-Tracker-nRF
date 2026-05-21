@@ -74,12 +74,6 @@
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
 #endif
 
-#if defined(CONFIG_BOARD_PROMICRO_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT mx, my, mz 
-#define SENSOR_QUATERNION_CORRECTION -0.7071f, 0.0f, 0.0f, 0.7071f
-#endif
-
-
 // default orientation for most boards with the sensor mounted flat on the PCB
 // with the top side as +X and front side as +Z and left side as +Y from your perspective
 // on stacked promicro with common breakout board
