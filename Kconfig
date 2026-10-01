@@ -533,6 +533,16 @@ config SENSOR_USE_EQF
 
 endchoice
 
+config EQF_ADAPTIVE_ACCEL
+    bool "EqF adaptive accelerometer trust"
+    default y
+    depends on SENSOR_USE_EQF
+    help
+        Adapt the accelerometer measurement covariance to detected specific
+        force.  Acceleration magnitude and a low-pass residual are combined,
+        with fast rejection and slow recovery, so translational motion has
+        less influence on tilt without weakening stationary convergence.
+
 config VQF_ADAPTIVE_TAU_ACC
     bool "VQF adaptive tauAcc (experimental)"
     default n

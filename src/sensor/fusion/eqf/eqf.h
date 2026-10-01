@@ -12,6 +12,11 @@
 #include <stdint.h>
 #include "sensor/sensor.h"
 
+typedef struct {
+	float accel_sigma;
+	float accel_motion;
+} eqf_adaptive_info_t;
+
 void eqf_init(float g_time, float a_time, float m_time);
 void eqf_load(const void *data);
 void eqf_save(void *data);
@@ -35,6 +40,7 @@ void eqf_get_quat(float *q);
 bool eqf_get_rest_detected(void);
 bool eqf_get_mag_dist_detected(void);
 void eqf_get_mag_ref(float *norm, float *dip);
+void eqf_get_adaptive_info(eqf_adaptive_info_t *info);
 
 extern const sensor_fusion_t sensor_fusion_eqf;
 
