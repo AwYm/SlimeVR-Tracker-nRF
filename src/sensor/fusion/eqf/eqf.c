@@ -36,7 +36,12 @@
 #define EQF_SIGMA_B      0.0003f   /* bias random walk PSD (rad/s²/√Hz) */
 #define EQF_SIGMA_ACC    0.01f     /* accel meas. noise (unit-vector)  */
 #define EQF_SIGMA_MAG    0.03f     /* mag meas. noise (unit-vector)    */
-#define EQF_ACC_ADAPT_K  100.0f    /* accel adaptive noise gain        */
+#define EQF_ACC_ADAPT_K  24.0f     /* maximum useful noise multiplier */
+#define EQF_ACC_MOTION_TAU 0.25f   /* specific-force baseline LP (s)  */
+#define EQF_ACC_ATTACK_TAU 0.04f   /* rapidly reject acceleration      */
+#define EQF_ACC_RELEASE_TAU 0.80f  /* cautiously restore gravity trust */
+#define EQF_ACC_NORM_SCALE 0.10f   /* 0.1 g norm error = full motion   */
+#define EQF_ACC_HP_SCALE   0.15f   /* 0.15 g residual = full motion    */
 
 #define EQF_INIT_SAMPLES   50     /* TRIAD init accumulation count    */
 #define EQF_ORTHO_INTERVAL 100    /* re-orthonormalise every N gyro   */
@@ -103,6 +108,12 @@ static bool  have_acc, have_mag;
 
 /* Last accel in m/s² for linear-acceleration query */
 static float last_a_ms2[3];
+
+/* Adaptive accelerometer covariance state (runtime-only). */
+static float acc_motion_lp[3];
+static float acc_motion_score;
+static float acc_adaptive_sigma;
+static bool acc_motion_lp_init;
 
 static int ortho_counter;
 
@@ -213,6 +224,47 @@ static inline float v3_dot(const float *a, const float *b)
 static inline float v3_norm(const float *v)
 {
 	return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+static inline bool v3_finite(const float *v)
+{
+	return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]);
+}
+
+static inline float eqf_clampf(float x, float lo, float hi);
+static inline float eqf_alpha_from_tau(float tau, float dt);
+
+static float eqf_adaptive_accel_sigma(const float a[3], float norm, float dt)
+{
+#if CONFIG_EQF_ADAPTIVE_ACCEL
+	if (!acc_motion_lp_init) {
+		memcpy(acc_motion_lp, a, sizeof(acc_motion_lp));
+		acc_motion_lp_init = true;
+	}
+
+	float baseline_alpha = eqf_alpha_from_tau(EQF_ACC_MOTION_TAU, dt);
+	float hp2 = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		float residual = a[i] - acc_motion_lp[i];
+		hp2 += residual * residual;
+		acc_motion_lp[i] += baseline_alpha * residual;
+	}
+
+	float norm_score = fabsf(norm - 1.0f) / EQF_ACC_NORM_SCALE;
+	float hp_score = sqrtf(hp2) / EQF_ACC_HP_SCALE;
+	float target = eqf_clampf(fmaxf(norm_score, hp_score), 0.0f, 1.0f);
+	float tau = target > acc_motion_score ? EQF_ACC_ATTACK_TAU : EQF_ACC_RELEASE_TAU;
+	acc_motion_score += eqf_alpha_from_tau(tau, dt) * (target - acc_motion_score);
+	acc_motion_score = eqf_clampf(acc_motion_score, 0.0f, 1.0f);
+	acc_adaptive_sigma = EQF_SIGMA_ACC * (1.0f + EQF_ACC_ADAPT_K * acc_motion_score * acc_motion_score);
+#else
+	(void)a;
+	(void)dt;
+	float dev = norm - 1.0f;
+	acc_motion_score = eqf_clampf(fabsf(dev) / EQF_ACC_NORM_SCALE, 0.0f, 1.0f);
+	acc_adaptive_sigma = EQF_SIGMA_ACC * (1.0f + 100.0f * dev * dev);
+#endif
+	return acc_adaptive_sigma;
 }
 
 static inline float eqf_resolve_dt(float time, float fallback_dt)
@@ -1065,6 +1117,10 @@ void eqf_init(float g_time, float a_time, float m_time)
 	have_mag = false;
 	ortho_counter = 0;
 	memset(last_a_ms2, 0, sizeof(last_a_ms2));
+	memset(acc_motion_lp, 0, sizeof(acc_motion_lp));
+	acc_motion_score = 0.0f;
+	acc_adaptive_sigma = EQF_SIGMA_ACC;
+	acc_motion_lp_init = false;
 
 	/* reset rest detection */
 	memset(rest_gyr_lp, 0, sizeof(rest_gyr_lp));
@@ -1107,6 +1163,10 @@ void eqf_load(const void *data)
 	mode = EQF_RUNNING;
 	ortho_counter = 0;
 	memset(last_a_ms2, 0, sizeof(last_a_ms2));
+	memset(acc_motion_lp, 0, sizeof(acc_motion_lp));
+	acc_motion_score = 0.0f;
+	acc_adaptive_sigma = EQF_SIGMA_ACC;
+	acc_motion_lp_init = false;
 	/* rest detection starts fresh each boot */
 	memset(rest_gyr_lp, 0, sizeof(rest_gyr_lp));
 	memset(rest_acc_lp, 0, sizeof(rest_acc_lp));
@@ -1143,6 +1203,8 @@ void eqf_update_gyro(float *g, float time)
 {
 	if (mode != EQF_RUNNING)
 		return;
+	if (!v3_finite(g))
+		return;
 	float dt = eqf_resolve_dt(time, dt_gyr);
 
 	/* convert deg/s → rad/s */
@@ -1171,6 +1233,11 @@ void eqf_update_gyro(float *g, float time)
 void eqf_update_accel(float *a, float time)
 {
 	float dt = eqf_resolve_dt(time, dt_acc);
+	if (!v3_finite(a))
+		return;
+	float anorm = v3_norm(a);
+	if (anorm < 0.1f || anorm > 5.0f)
+		return;
 
 	/* store in m/s² for get_lin_a */
 	last_a_ms2[0] = a[0] * CONST_EARTH_GRAVITY;
@@ -1206,18 +1273,9 @@ void eqf_update_accel(float *a, float time)
 		return;
 	}
 
-	/* adaptive accel noise:  σ × (1 + k·(|a|−1)²) */
-	float anorm = v3_norm(a);
-	float dev = anorm - 1.0f;
-	float base_sigma = EQF_SIGMA_ACC;
-	/* In 6-axis, inflate σ_acc to weaken accel influence overall */
-	if (!mag_active)
-		base_sigma *= 50.0f;
-	float sigma = base_sigma * (1.0f + EQF_ACC_ADAPT_K * dev * dev);
-
-	/* skip wildly-anomalous readings */
-	if (anorm < 0.1f || anorm > 5.0f)
-		return;
+	/* Magnetic availability does not change gravity's pitch/roll quality.
+	 * suppress_yaw below removes the unobservable heading component. */
+	float sigma = eqf_adaptive_accel_sigma(a, anorm, dt);
 
 	static const float d_acc[3] = { 0.0f, 0.0f, 1.0f };
 	eqf_dir_update(a, d_acc, sigma, !mag_active);
@@ -1267,6 +1325,8 @@ void eqf_update_accel(float *a, float time)
 void eqf_update_mag(float *m, float time)
 {
 	float dt = eqf_resolve_dt(time, dt_mag);
+	if (!v3_finite(m))
+		return;
 	float mn = v3_norm(m);
 	if (mn < 1e-10f)
 		return;
@@ -1497,6 +1557,14 @@ void eqf_get_mag_ref(float *norm, float *dip)
 {
 	*norm = st.mag_ref_norm;
 	*dip = eqf_get_mag_ref_dip();
+}
+
+void eqf_get_adaptive_info(eqf_adaptive_info_t *info)
+{
+	if (info == NULL)
+		return;
+	info->accel_sigma = acc_adaptive_sigma;
+	info->accel_motion = acc_motion_score;
 }
 
 

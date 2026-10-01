@@ -211,6 +211,8 @@ eqf = re.sub(r'^#include[^\n]*\n', '', eqf, flags=re.M).split('const sensor_fusi
 eqf_test = preamble + '''
 #define BUILD_ASSERT(c,m) _Static_assert(c,m)
 #define CONST_EARTH_GRAVITY 9.80665f
+#define CONFIG_EQF_ADAPTIVE_ACCEL 1
+typedef struct { float accel_sigma; float accel_motion; } eqf_adaptive_info_t;
 struct retained_data { unsigned char fusion_data[1024]; };
 ''' + eqf + r'''
 static void check_gyro_rebase(void) {
@@ -258,6 +260,19 @@ int main(void) {
     assert(!eqf_take_rest_observation(&rest)); /* INIT is not an observation. */
     mode=EQF_RUNNING;
     eqf_update_gyro(zero,.01f);
+	/* Adaptive trust reacts quickly to translation and recovers gradually. */
+	for(int i=0;i<20;i++) eqf_update_accel(still,.01f);
+	float quiet_sigma=acc_adaptive_sigma;
+	float moving[3]={.8f,0,1};
+	for(int i=0;i<8;i++) eqf_update_accel(moving,.01f);
+	assert(acc_motion_score>.5f && acc_adaptive_sigma>quiet_sigma*5);
+	float rejected_sigma=acc_adaptive_sigma;
+	for(int i=0;i<200;i++) eqf_update_accel(still,.01f);
+	assert(acc_adaptive_sigma<rejected_sigma && acc_adaptive_sigma>quiet_sigma);
+	eqf_adaptive_info_t adaptive;
+	eqf_get_adaptive_info(&adaptive);
+	assert(adaptive.accel_sigma==acc_adaptive_sigma && adaptive.accel_motion==acc_motion_score);
+	eqf_take_rest_observation(NULL);
     eqf_update_accel(invalid,.01f);
     assert(!eqf_take_rest_observation(&rest)); /* gyro-only and rejected accel */
     eqf_update_accel(still,.01f);

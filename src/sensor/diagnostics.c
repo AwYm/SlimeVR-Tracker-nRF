@@ -31,6 +31,14 @@
 
 #if CONFIG_SENSOR_USE_VQF
 #include "fusion/vqf/vqf.h"
+#else
+/* Keep diagnostics host-testable without pulling the fusion interface into
+ * this translation unit.  This mirrors the small public EqF diagnostic ABI. */
+typedef struct {
+	float accel_sigma;
+	float accel_motion;
+} eqf_adaptive_info_t;
+void eqf_get_adaptive_info(eqf_adaptive_info_t *info);
 #endif
 
 LOG_MODULE_DECLARE(sensor, LOG_LEVEL_INF);
@@ -400,6 +408,8 @@ void sensor_diagnostics_output(
 				);
 			}
 #else
+			eqf_adaptive_info_t eqf_info;
+			eqf_get_adaptive_info(&eqf_info);
 			printk(
 				"     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 				(double)q[0],
@@ -409,6 +419,11 @@ void sensor_diagnostics_output(
 				(double)lin_a[0],
 				(double)lin_a[1],
 				(double)lin_a[2]
+			);
+			printk(
+				"     EqF Adapt: motion:%.3f accelSigma:%.4f\n",
+				(double)eqf_info.accel_motion,
+				(double)eqf_info.accel_sigma
 			);
 #if SENSOR_DEBUG_QDEV_QOUT
 			float debug_device_quat[4];

@@ -2,6 +2,7 @@
 #define SLIMENRF_SENSOR_DATA_SNAPSHOT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -11,6 +12,8 @@ typedef struct {
 	float q[4];
 	float a[3];
 	float m[3];
+	int64_t data_time;
+	uint32_t qa_generation;
 	bool precise;
 	atomic_t qa_pending;
 	atomic_t m_pending;
@@ -30,13 +33,16 @@ static inline void sensor_data_snapshot_publish_qa(
 	sensor_data_snapshot_t *state,
 	const float q[4],
 	const float a[3],
-	bool precise
+	bool precise,
+	int64_t data_time
 )
 {
 	k_spinlock_key_t key = k_spin_lock(&state->lock);
 	memcpy(state->q, q, sizeof(state->q));
 	memcpy(state->a, a, sizeof(state->a));
 	state->precise = precise;
+	state->data_time = data_time;
+	state->qa_generation++;
 	atomic_set(&state->qa_pending, 1);
 	k_spin_unlock(&state->lock, key);
 }
@@ -55,12 +61,20 @@ static inline void sensor_data_snapshot_publish_m(
 static inline void sensor_data_snapshot_read_qa(
 	sensor_data_snapshot_t *state,
 	float q_out[4],
-	float a_out[3]
+	float a_out[3],
+	int64_t *data_time_out,
+	uint32_t *generation_out
 )
 {
 	k_spinlock_key_t key = k_spin_lock(&state->lock);
 	memcpy(q_out, state->q, sizeof(state->q));
 	memcpy(a_out, state->a, sizeof(state->a));
+	if (data_time_out != NULL) {
+		*data_time_out = state->data_time;
+	}
+	if (generation_out != NULL) {
+		*generation_out = state->qa_generation;
+	}
 	atomic_set(&state->qa_pending, 0);
 	k_spin_unlock(&state->lock, key);
 }
@@ -68,12 +82,20 @@ static inline void sensor_data_snapshot_read_qa(
 static inline void sensor_data_snapshot_read_qm(
 	sensor_data_snapshot_t *state,
 	float q_out[4],
-	float m_out[3]
+	float m_out[3],
+	int64_t *data_time_out,
+	uint32_t *generation_out
 )
 {
 	k_spinlock_key_t key = k_spin_lock(&state->lock);
 	memcpy(q_out, state->q, sizeof(state->q));
 	memcpy(m_out, state->m, sizeof(state->m));
+	if (data_time_out != NULL) {
+		*data_time_out = state->data_time;
+	}
+	if (generation_out != NULL) {
+		*generation_out = state->qa_generation;
+	}
 	atomic_set(&state->qa_pending, 0);
 	atomic_set(&state->m_pending, 0);
 	k_spin_unlock(&state->lock, key);

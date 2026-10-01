@@ -56,14 +56,66 @@ static float sensor_last_q[4];
 static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static K_SEM_DEFINE(connection_wake_sem, 0, 1);
 
+static struct {
+	struct k_spinlock lock;
+	uint64_t count;
+	uint64_t total_us;
+	uint64_t min_us;
+	uint64_t max_us;
+	uint32_t invalid;
+} sensor_age_stats;
+/* Snapshot payloads are consumed only by the connection thread. Keep the
+ * deduplication hot path out of the statistics lock used by console readers. */
+static uint32_t sensor_age_last_generation;
+static bool sensor_age_has_last_generation;
+
+static void connection_record_sensor_age(int64_t data_time, uint32_t generation)
+{
+	if (sensor_age_has_last_generation && generation == sensor_age_last_generation) {
+		return;
+	}
+	sensor_age_has_last_generation = true;
+	sensor_age_last_generation = generation;
+
+	int64_t now = k_uptime_ticks();
+	bool timestamp_valid = data_time > 0 && data_time <= now;
+	uint64_t age_us = timestamp_valid
+		? k_ticks_to_us_floor64((uint64_t)(now - data_time)) : 0;
+	k_spinlock_key_t key = k_spin_lock(&sensor_age_stats.lock);
+	if (!timestamp_valid) {
+		sensor_age_stats.invalid++;
+		k_spin_unlock(&sensor_age_stats.lock, key);
+		return;
+	}
+	if (sensor_age_stats.count == 0 || age_us < sensor_age_stats.min_us) {
+		sensor_age_stats.min_us = age_us;
+	}
+	if (age_us > sensor_age_stats.max_us) {
+		sensor_age_stats.max_us = age_us;
+	}
+	sensor_age_stats.total_us += age_us;
+	sensor_age_stats.count++;
+	k_spin_unlock(&sensor_age_stats.lock, key);
+}
+
 static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
 {
-	sensor_data_snapshot_read_qa(&sensor_data_snapshot, q_out, a_out);
+	int64_t data_time;
+	uint32_t generation;
+	sensor_data_snapshot_read_qa(
+		&sensor_data_snapshot, q_out, a_out, &data_time, &generation
+	);
+	connection_record_sensor_age(data_time, generation);
 }
 
 static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
 {
-	sensor_data_snapshot_read_qm(&sensor_data_snapshot, q_out, m_out);
+	int64_t data_time;
+	uint32_t generation;
+	sensor_data_snapshot_read_qm(
+		&sensor_data_snapshot, q_out, m_out, &data_time, &generation
+	);
+	connection_record_sensor_age(data_time, generation);
 }
 
 static bool connection_sensor_get_precise_quat(void)
@@ -177,6 +229,23 @@ void connection_print_ping_stats(void)
 		ping_phase_ms(get_ping_interval_ms()),
 		(uint32_t)atomic_get(&ping_server_phase_aligned),
 		(uint32_t)atomic_get(&ping_resync_requested)
+	);
+	uint64_t sensor_count, sensor_total_us, sensor_min_us, sensor_max_us;
+	uint32_t sensor_invalid;
+	k_spinlock_key_t key = k_spin_lock(&sensor_age_stats.lock);
+	sensor_count = sensor_age_stats.count;
+	sensor_total_us = sensor_age_stats.total_us;
+	sensor_min_us = sensor_age_stats.min_us;
+	sensor_max_us = sensor_age_stats.max_us;
+	sensor_invalid = sensor_age_stats.invalid;
+	k_spin_unlock(&sensor_age_stats.lock, key);
+	printk(
+		"SENSOR AGE count=%llu min_us=%llu avg_us=%llu max_us=%llu invalid=%u\n",
+		(unsigned long long)sensor_count,
+		(unsigned long long)(sensor_count ? sensor_min_us : 0),
+		(unsigned long long)(sensor_count ? sensor_total_us / sensor_count : 0),
+		(unsigned long long)(sensor_count ? sensor_max_us : 0),
+		sensor_invalid
 	);
 }
 
@@ -485,18 +554,16 @@ void connection_update_sensor_ids(int imu, int mag)
 
 void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
-	// data_time is in system ticks, nonzero means valid measurement
-	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
-
-	// Reject NaN quaternions to prevent sending invalid data to server
-	if (isnan(q[0]) || isnan(q[1]) || isnan(q[2]) || isnan(q[3])) {
-		LOG_WRN("Rejected NaN quaternion");
+	// Reject non-finite values before fixed-point packet conversion.
+	if (!isfinite(q[0]) || !isfinite(q[1]) || !isfinite(q[2]) || !isfinite(q[3])
+	    || !isfinite(a[0]) || !isfinite(a[1]) || !isfinite(a[2])) {
+		LOG_WRN("Rejected non-finite sensor data");
 		return;
 	}
 
 	bool precise = q_epsilon(q, sensor_last_q, 0.005f);
 	memcpy(sensor_last_q, q, sizeof(sensor_last_q));
-	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise);
+	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise, data_time);
 	connection_signal_wake();
 }
 
