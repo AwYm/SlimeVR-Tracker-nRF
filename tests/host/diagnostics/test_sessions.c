@@ -10,6 +10,12 @@
 float sensor_get_accel_odr(void);
 #include "../../../src/sensor/diagnostics.c"
 
+void eqf_get_adaptive_info(eqf_adaptive_info_t *info)
+{
+	info->accel_sigma = 0.01f;
+	info->accel_motion = 0.0f;
+}
+
 static int64_t now_ms;
 static unsigned int lock_depth;
 static unsigned int clock_calls_until_restart;

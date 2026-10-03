@@ -152,6 +152,14 @@ endif()
 if(NOT CONFIG_CUSTOMER_INFO OR NOT CONFIG_SOC_SERIES_NRF52)
   list(FILTER app_sources EXCLUDE REGEX ".*/customer_info(_parser)?\\.c$")
 endif()
+# Only compile the selected fusion backend.  LTO used to discard the inactive
+# implementation at link time, but compiling it still cost build time and made
+# EqF-only builds depend on the VQF submodule being populated.
+if(CONFIG_SENSOR_USE_VQF)
+  list(FILTER app_sources EXCLUDE REGEX ".*/sensor/fusion/eqf/eqf\\.c$")
+else()
+  list(FILTER app_sources EXCLUDE REGEX ".*/sensor/fusion/vqf/vqf\\.c$")
+endif()
 list(FILTER app_sources EXCLUDE REGEX ".*/sensor/imu/.*\\.c$")
 list(FILTER app_sources EXCLUDE REGEX ".*/sensor/mag/.*\\.c$")
 target_sources(app PRIVATE ${app_sources})
@@ -232,16 +240,21 @@ if(_slimenrf_imu_drv_count EQUAL 0)
 endif()
 # NORDIC SDK APP END
 
-FILE(GLOB_RECURSE files vqf-c/src/*.c)
-target_sources(app PRIVATE ${files})
-set_property(
-  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/vqf-c/src/vqf.c
-  APPEND PROPERTY COMPILE_OPTIONS
-  -Wno-double-promotion
-)
+if(CONFIG_SENSOR_USE_VQF)
+  FILE(GLOB_RECURSE vqf_sources CONFIGURE_DEPENDS vqf-c/src/*.c)
+  if(NOT vqf_sources)
+    message(FATAL_ERROR "VQF selected, but vqf-c is missing; initialize submodules")
+  endif()
+  target_sources(app PRIVATE ${vqf_sources})
+  set_property(
+    SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/vqf-c/src/vqf.c
+    APPEND PROPERTY COMPILE_OPTIONS
+    -Wno-double-promotion
+  )
+  target_include_directories(app PRIVATE vqf-c/src)
+endif()
 
 target_include_directories(app PRIVATE src)
-target_include_directories(app PRIVATE vqf-c/src)
 
 # Force recompile for updated build timestamp
 add_custom_target(touch_util_h ALL
